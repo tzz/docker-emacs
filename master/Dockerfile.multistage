@@ -1,0 +1,87 @@
+ARG BASE_IMAGE=ubuntu:17.04
+# Multi-stage building requires Docker 17.05 or later
+FROM ${BASE_IMAGE} as gnutls-builder
+
+ENV DEBIAN_FRONTEND noninteractive
+RUN apt-get update && apt-get install -y -o=Dpkg::Use-Pty=0 \
+ autoconf \
+ autogen \
+ automake \
+ autopoint \
+ bison \
+ dns-root-data \
+ gawk \
+ gettext \
+ git-core \
+ gperf \
+ gtk-doc-tools \
+ guile-2.0-dev \
+ help2man \
+ libidn2-0-dev \
+ libp11-kit-dev \
+ libtasn1-6-dev \
+ libtool \
+ libtspi-dev \
+ libunbound-dev \
+ libunistring-dev \
+ nettle-dev \
+ texinfo \
+ texlive \
+ texlive-extra-utils \
+ texlive-generic-recommended
+
+ARG GNUTLS_REPOSITORY="https://gitlab.com/gnutls/gnutls.git"
+ARG GNUTLS_BRANCH="master"
+# override to "check" here to run the GnuTLS tests
+ARG GNUTLS_EXTRA_TARGETS=""
+
+RUN git clone --depth 1 --branch ${GNUTLS_BRANCH} ${GNUTLS_REPOSITORY} /tmp/gnutls
+
+WORKDIR /tmp/gnutls
+RUN git submodule update --init
+RUN make bootstrap autoreconf
+
+RUN mkdir -p /tmp/gnutls/build
+WORKDIR /tmp/gnutls/build
+RUN ../configure --prefix=/usr --disable-doc --disable-guile --disable-cxx --disable-full-test-suite
+RUN make -j8 ${GNUTLS_EXTRA_TARGETS}
+
+FROM gnutls-builder as emacs-builder
+
+ENV DEBIAN_FRONTEND noninteractive
+# Install dependencies
+RUN apt-get update && apt-get install --no-install-recommends -y -o=Dpkg::Use-Pty=0 \
+ curl \
+ git
+
+RUN apt-get build-dep -y emacs24
+
+# Now install GnuTLS
+COPY --from=gnutls-builder /tmp/gnutls /tmp/gnutls
+WORKDIR /tmp/gnutls/build
+RUN make install
+
+# Build emacs
+ARG EMACS_REPOSITORY="git://git.sv.gnu.org/emacs.git"
+ARG EMACS_BRANCH="master"
+
+RUN git clone --depth 1 --branch ${EMACS_BRANCH} ${EMACS_REPOSITORY} /tmp/emacs
+WORKDIR /tmp/emacs
+RUN ./autogen.sh
+RUN ./configure
+RUN make -j 8
+
+FROM emacs-builder as emacs-tester
+
+WORKDIR /tmp/emacs/test
+RUN make
+
+# Final image
+FROM emacs-builder as emacs-final
+
+WORKDIR /tmp/emacs
+RUN make -j 8 install
+RUN rm -rf /tmp/emacs /tmp/gnutls
+
+WORKDIR /rootfs
+ENTRYPOINT ["emacs"]
